@@ -46,12 +46,10 @@ class ApifyClient:
         
         logger.info(f"🔍 Starting Amazon scrape for keyword: '{keyword}'")
         
-        # Prepare the input for Junglee actor
+        # Prepare the input for Junglee actor - FIXED: categoryUrls instead of startUrls
         run_input = {
-            "startUrls": [
-                {
-                    "url": f"https://www.amazon.com/s?k={keyword.replace(' ', '+')}"
-                }
+            "categoryUrls": [  # CHANGED: startUrls → categoryUrls
+                f"https://www.amazon.com/s?k={keyword.replace(' ', '+')}"
             ],
             "maxResultsPerStartUrl": max_products,
             "includeReviews": True,
