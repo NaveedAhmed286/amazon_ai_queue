@@ -235,12 +235,7 @@ async def process_next_task():
                 task_id=task_id,
                 client_id=client_id,
                 task_type=task_type,
-                results={"error": str(e), "status": "failed"},
-                callback_url=task.get("callback_url")
-            )
-        return False
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
