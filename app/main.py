@@ -10,7 +10,7 @@ from app.logger import logger
 from app.queue_manager import QueueManager
 from app.agent import AmazonAgent
 
-# Initialize
+# Initialize FastAPI
 app = FastAPI(
     title="Amazon AI Queue Agent",
     version="1.0.0",
@@ -27,19 +27,36 @@ class ProductAnalysisRequest(BaseModel):
     client_id: str
     products: List[Dict]
     priority: str = "normal"
-    callback_url: Optional[str] = None
 
 class KeywordAnalysisRequest(BaseModel):
     client_id: str
     keyword: str
     max_products: int = 50
-    callback_url: Optional[str] = None
 
+# Startup event
 @app.on_event("startup")
 async def startup_event():
     logger.info("Amazon AI Agent starting up...")
     asyncio.create_task(queue_processor())
 
+# Health endpoint
+@app.get("/health")
+async def health_check():
+    try:
+        queue_size = await queue_manager.get_queue_size()
+        redis_status = await queue_manager.check_health()
+        return {
+            "status": "healthy" if redis_status else "degraded",
+            "timestamp": datetime.utcnow().isoformat(),
+            "queue_size": queue_size,
+            "redis": "connected" if redis_status else "disconnected",
+            "version": "1.0.0"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"status": "unhealthy", "error": str(e)}
+
+# Root
 @app.get("/")
 async def root():
     return {
@@ -55,6 +72,7 @@ async def root():
         }
     }
 
+# Submit product analysis
 @app.post("/api/analyze/products")
 async def analyze_products(request: ProductAnalysisRequest):
     try:
@@ -64,8 +82,7 @@ async def analyze_products(request: ProductAnalysisRequest):
             task_type="product_analysis",
             client_id=request.client_id,
             data={"products": request.products},
-            priority=request.priority,
-            callback_url=request.callback_url
+            priority=request.priority
         )
         logger.info(f"Product analysis queued: {task_id}")
         return {
@@ -78,6 +95,7 @@ async def analyze_products(request: ProductAnalysisRequest):
         logger.error(f"Error submitting products: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Submit keyword analysis
 @app.post("/api/analyze/keyword")
 async def analyze_keyword(request: KeywordAnalysisRequest):
     try:
@@ -89,9 +107,7 @@ async def analyze_keyword(request: KeywordAnalysisRequest):
             data={
                 "keyword": request.keyword,
                 "max_products": request.max_products
-            },
-            priority="normal",
-            callback_url=request.callback_url
+            }
         )
         logger.info(f"Keyword analysis queued: {task_id} for '{request.keyword}'")
         return {
@@ -103,6 +119,7 @@ async def analyze_keyword(request: KeywordAnalysisRequest):
         logger.error(f"Error submitting keyword: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Check task status
 @app.get("/api/status/{task_id}")
 async def get_status(task_id: str):
     try:
@@ -114,7 +131,6 @@ async def get_status(task_id: str):
             return {
                 "task_id": task_id,
                 "status": task_info.get("status", "pending"),
-                "position": task_info.get("position"),
                 "created_at": task_info.get("created_at")
             }
         return result
@@ -124,50 +140,28 @@ async def get_status(task_id: str):
         logger.error(f"Error getting status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Queue stats
 @app.get("/api/queue/stats")
 async def queue_stats():
     try:
         stats = await queue_manager.get_queue_stats()
-        return {
-            "status": "success",
-            "data": stats
-        }
+        return {"status": "success", "data": stats}
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-async def health_check():
-    try:
-        queue_size = await queue_manager.get_queue_size()
-        redis_status = await queue_manager.check_health()
-        return {
-            "status": "healthy" if redis_status else "degraded",
-            "timestamp": datetime.utcnow().isoformat(),
-            "queue_size": queue_size,
-            "redis": "connected" if redis_status else "disconnected",
-            "version": "1.0.0"
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-
+# Queue processor
 async def queue_processor():
     logger.info("Queue processor started")
     while True:
         try:
             processed = await process_next_task()
-            if not processed:
-                await asyncio.sleep(5)
-            else:
-                await asyncio.sleep(1)
+            await asyncio.sleep(1 if processed else 5)
         except Exception as e:
             logger.error(f"Queue processor error: {e}")
             await asyncio.sleep(10)
 
+# Process next task
 async def process_next_task():
     try:
         task = await queue_manager.get_next_task()
@@ -180,7 +174,6 @@ async def process_next_task():
         data = task["data"]
 
         logger.info(f"Processing {task_type}: {task_id}")
-
         await queue_manager.update_task_status(task_id, "processing")
 
         if task_type == "product_analysis":
@@ -194,14 +187,13 @@ async def process_next_task():
         else:
             results = {"error": "Unknown task type", "status": "failed"}
 
+        # Save results in Redis (no callback)
         await queue_manager.save_task_result(
             task_id=task_id,
             client_id=client_id,
             task_type=task_type,
-            results=results,
-            callback_url=task.get("callback_url")
+            results=results
         )
-
         logger.info(f"Completed {task_type}: {task_id}")
         return True
 
@@ -212,11 +204,11 @@ async def process_next_task():
                 task_id=task_id,
                 client_id=client_id,
                 task_type=task_type,
-                results={"error": str(e), "status": "failed"},
-                callback_url=task.get("callback_url")
+                results={"error": str(e), "status": "failed"}
             )
         return False
 
+# Run app
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
