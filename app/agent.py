@@ -9,7 +9,7 @@ from google.oauth2.service_account import Credentials
 
 from app.logger import logger
 from app.memory_manager import memory_manager
-from app.apify_client import ApifyClientWrapper
+from app.apify_client import apify_client
 
 
 class AmazonAgent:
