@@ -118,3 +118,4 @@ Built for speed, safety, and scalability — fully automated, no manual interven
 ---
 
 This README is technical and complete — deploy directly. 🚀   
+<!-- trigger railway deploy -->
