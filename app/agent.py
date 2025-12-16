@@ -3,125 +3,195 @@ import json
 import aiohttp
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
+
 from app.logger import logger
 from app.memory_manager import memory_manager
+from app.apify_client import ApifyClientWrapper
+
 
 class AmazonAgent:
     def __init__(self):
+        # DeepSeek
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
         self.deepseek_api_url = "https://api.deepseek.com/v1/chat/completions"
-        self.sheet_id = os.getenv("SHEET_ID")
-        self.sheet_name = "Agent s Results"  # your sheet name
-        self.creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-        self.creds_dict = json.loads(self.creds_json) if self.creds_json else None
-        self.scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        self.sheet_service = self.init_google_sheets()
 
-    def init_google_sheets(self):
-        if not self.creds_dict:
-            logger.warning("Google service account not configured!")
-            return None
-        creds = Credentials.from_service_account_info(self.creds_dict, scopes=self.scopes)
-        service = build("sheets", "v4", credentials=creds)
-        return service.spreadsheets()
+        # Google Sheets
+        self.spreadsheet_id = os.getenv("SPREADSHEET_ID")
+        self.sheet_name = os.getenv("SHEET_NAME", "Agent s Results")
 
+        # Google service account (Railway ENV)
+        service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if not service_account_json:
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not set")
+
+        creds_info = json.loads(service_account_json)
+        self.creds = Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        self.sheets_service = build("sheets", "v4", credentials=self.creds)
+
+        # Apify
+        self.apify = ApifyClientWrapper()
+
+    # ---------------------------
+    # SMART PRODUCT LIMIT LOGIC
+    # ---------------------------
+    def _decide_product_limit(self, investment: Optional[float], fallback: int) -> int:
+        if not investment:
+            return fallback
+
+        if investment <= 2000:
+            return 5
+        elif investment <= 5000:
+            return 10
+        elif investment <= 10000:
+            return 20
+        else:
+            return 30
+
+    # ---------------------------
+    # GOOGLE SHEETS SAVE
+    # ---------------------------
+    def _save_to_sheet(self, rows: List[List[Any]]):
+        body = {"values": rows}
+        self.sheets_service.spreadsheets().values().append(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"{self.sheet_name}!A1",
+            valueInputOption="USER_ENTERED",
+            body=body
+        ).execute()
+
+    # ---------------------------
+    # PRODUCT ANALYSIS (DIRECT)
+    # ---------------------------
     async def analyze_products(self, products: List[Dict]) -> Dict:
-        """Analyze Amazon products using DeepSeek"""
         try:
-            results = []
-            for product in products:
-                prompt = f"Analyze this product: {json.dumps(product)}"
-                response = await self.call_deepseek(prompt)
-                results.append({
-                    "product": product,
-                    "analysis": response
-                })
-            await self.save_to_sheets(results)
-            return {"status": "completed", "results": results}
+            analysis = await self._deepseek_analyze(products)
+
+            rows = []
+            for p in analysis["products"]:
+                rows.append([
+                    datetime.utcnow().isoformat(),
+                    p.get("title"),
+                    p.get("price"),
+                    p.get("score"),
+                    p.get("recommendation")
+                ])
+
+            self._save_to_sheet(rows)
+
+            return {
+                "status": "completed",
+                "count": len(rows),
+                "products": analysis["products"]
+            }
+
         except Exception as e:
             logger.error(f"Product analysis failed: {e}")
             return {"status": "failed", "error": str(e)}
 
-    async def analyze_keyword(self, keyword: Optional[str] = None, client_id: str = "", 
-                              investment: Optional[float] = None, price_range: Optional[List[float]] = None,
-                              max_products: int = 50) -> Dict:
-        """
-        Analyze products by keyword or generate keywords from investment/price
-        """
+    # ---------------------------
+    # KEYWORD ANALYSIS (APIFY)
+    # ---------------------------
+    async def analyze_keyword(
+        self,
+        keyword: str,
+        client_id: str,
+        max_products: int = 50,
+        investment: Optional[float] = None
+    ) -> Dict:
         try:
-            keywords_to_use = []
-            
-            if keyword:
-                keywords_to_use = [keyword]
-            elif investment or price_range:
-                # Generate keywords using DeepSeek from investment & price
-                prompt = f"Suggest 5-10 Amazon product keywords suitable for investment {investment} and price range {price_range}"
-                keywords_to_use = await self.call_deepseek(prompt)
-                if isinstance(keywords_to_use, str):
-                    # Assume DeepSeek returns comma-separated keywords
-                    keywords_to_use = [k.strip() for k in keywords_to_use.split(",")]
-            
-            all_results = []
-            # Scrape products for each keyword
-            for kw in keywords_to_use:
-                scraped_products = await self.scrape_amazon_products(kw, max_products)
-                analysis_results = await self.analyze_products(scraped_products)
-                all_results.append({
-                    "keyword": kw,
-                    "analysis": analysis_results
-                })
-            return {"status": "completed", "results": all_results}
+            # Decide smart limit
+            final_limit = self._decide_product_limit(investment, max_products)
+
+            logger.info(
+                f"Scraping '{keyword}' | investment={investment} | limit={final_limit}"
+            )
+
+            products = await self.apify.scrape_amazon_products(
+                keyword=keyword,
+                max_products=final_limit
+            )
+
+            if not products:
+                return {"status": "completed", "message": "No products found"}
+
+            analysis = await self._deepseek_analyze(products)
+
+            rows = []
+            for p in analysis["products"]:
+                rows.append([
+                    datetime.utcnow().isoformat(),
+                    p.get("title"),
+                    p.get("price"),
+                    p.get("score"),
+                    p.get("recommendation")
+                ])
+
+            self._save_to_sheet(rows)
+
+            # Memory learning
+            await memory_manager.learn_from_analysis(
+                client_id=client_id,
+                task_id=f"kw-{datetime.utcnow().timestamp()}",
+                analysis_type="keyword",
+                input_data={"keyword": keyword},
+                result_data=analysis,
+                key_insights=analysis.get("insights", [])
+            )
+
+            return {
+                "status": "completed",
+                "scraped": len(products),
+                "analyzed": len(rows)
+            }
+
         except Exception as e:
             logger.error(f"Keyword analysis failed: {e}")
             return {"status": "failed", "error": str(e)}
 
-    async def call_deepseek(self, prompt: str) -> Any:
-        """Call DeepSeek API"""
+    # ---------------------------
+    # DEEPSEEK ANALYSIS
+    # ---------------------------
+    async def _deepseek_analyze(self, products: List[Dict]) -> Dict:
         headers = {
             "Authorization": f"Bearer {self.deepseek_api_key}",
             "Content-Type": "application/json"
         }
-        data = {
-            "model": "gpt-4",
-            "prompt": prompt,
-            "temperature": 0.7
+
+        prompt = (
+            "Analyze these Amazon products for profitability. "
+            "Return JSON with fields: title, price, score (0-100), recommendation.\n\n"
+            f"{json.dumps(products[:30])}"
+        )
+
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3
         }
+
         async with aiohttp.ClientSession() as session:
-            async with session.post(self.deepseek_api_url, headers=headers, json=data) as resp:
-                resp_json = await resp.json()
-                return resp_json.get("output") or resp_json
+            async with session.post(
+                self.deepseek_api_url,
+                headers=headers,
+                json=payload,
+                timeout=120
+            ) as resp:
+                data = await resp.json()
 
-    async def scrape_amazon_products(self, keyword: str, max_products: int = 50) -> List[Dict]:
-        """Call Apify actor to scrape Amazon products by keyword"""
-        from app.apify_client import apify_client
-        try:
-            return await apify_client.scrape_amazon_products(keyword, max_products)
-        except Exception as e:
-            logger.error(f"Apify scrape failed for keyword '{keyword}': {e}")
-            return []
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
 
-    async def save_to_sheets(self, data: List[Dict]):
-        """Save results to Google Sheet"""
-        if not self.sheet_service:
-            logger.warning("Google Sheets service not initialized.")
-            return
-        try:
-            values = []
-            for item in data:
-                # Flatten product + analysis into a single row
-                row = [
-                    datetime.utcnow().isoformat(),
-                    json.dumps(item)
-                ]
-                values.append(row)
-            body = {"values": values}
-            self.sheet_service.values().append(
-                spreadsheetId=self.sheet_id,
-                range=f"{self.sheet_name}!A1",
-                valueInputOption="RAW",
-                body=body
-            ).execute()
-        except Exception as e:
-            logger.error(f"Failed to save to Google Sheets: {e}")
+        return {
+            "products": parsed,
+            "insights": [
+                "Low competition niches preferred",
+                "Avoid fragile categories",
+                "Focus on consistent pricing"
+            ]
+    }
