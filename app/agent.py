@@ -192,7 +192,16 @@ class AmazonAgent:
             
             if "choices" in data and data["choices"]:
                 content = data["choices"][0]["message"]["content"]
-                print(f"DEBUG: Content received: {content[:100]}...")
+                print(f"DEBUG: Raw content: {content[:100]}...")
+                
+                # Clean markdown code blocks
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                
+                print(f"DEBUG: Cleaned content: {content[:100]}...")
                 
                 try:
                     parsed = json.loads(content)
