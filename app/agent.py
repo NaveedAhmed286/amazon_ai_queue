@@ -19,7 +19,11 @@ class AmazonAgent:
         self.deepseek_api_url = "https://api.deepseek.com/chat/completions"
 
         # Google Sheets
-        self.spreadsheet_id = "1xLI2iPQdwZnZlK8TFPuFkaSQaTkVUvGnN_af520yAPk"
+        self.spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    if not self.spreadsheet_id:
+        logger.error("❌ SPREADSHEET_ID environment variable is not set in Railway!")
+        logger.error("Please set SPREADSHEET_ID in Railway Variables")
+
         self.sheet_name = os.getenv("SHEET_NAME", "Sheet1")
 
         # Google service account (Railway ENV)
