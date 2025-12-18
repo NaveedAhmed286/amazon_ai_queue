@@ -165,6 +165,15 @@ class AmazonAgent:
     # DEEPSEEK ANALYSIS
     # ---------------------------
     async def _deepseek_analyze(self, products: List[Dict]) -> Dict:
+        print("=" * 60)
+        print("🚨 DEBUG: _deepseek_analyze START")
+        print(f"🚨 DEBUG: self.deepseek_api_key exists: {bool(self.deepseek_api_key)}")
+        if self.deepseek_api_key:
+            print(f"🚨 DEBUG: Key starts with: {self.deepseek_api_key[:10]}...")
+            print(f"🚨 DEBUG: Key length: {len(self.deepseek_api_key)}")
+        print(f"🚨 DEBUG: Products count: {len(products)}")
+        print(f"🚨 DEBUG: First product: {products[0] if products else None}")
+        print("=" * 60)
         headers = {
             "Authorization": f"Bearer {self.deepseek_api_key.strip()}",
             "Content-Type": "application/json"
@@ -183,14 +192,42 @@ class AmazonAgent:
         }
 
         async with aiohttp.ClientSession() as session:
+                print("🚨 DEBUG: Making DeepSeek API call...")
             async with session.post(
                 self.deepseek_api_url,
                 headers=headers,
                 json=payload,
                 timeout=120
             ) as resp:
-                data = await resp.json()
+                print(f"🚨 DEBUG: HTTP Status Code: {resp.status}")
+                # Get raw response first
+                raw_response = await resp.text()
+                print(f"🚨 DEBUG: Raw response length: {len(raw_response)}")
+                print(f"🚨 DEBUG: First 300 chars: {raw_response[:300]}")
+                
+                # Try to parse as JSON
+                try:
+                    data = await resp.json()
+                    print("🚨 DEBUG: Response parsed as JSON successfully")
+                except Exception as e:
+                    print(f"🚨 ERROR: Failed to parse JSON: {e}")
+                    print(f"🚨 ERROR: Full response: {raw_response}")
+                    raise Exception(f"DeepSeek API returned invalid JSON: {str(e)[:100]}")
 
+        # Check if API returned error
+        if "error" in data:
+            print(f"🚨 ERROR: DeepSeek API error: {data['error']}")
+            raise Exception(f"DeepSeek API error: {data['error']}")
+        
+        if "choices" not in data:
+            print(f"🚨 ERROR: No choices in response. Data: {data}")
+            raise Exception("DeepSeek returned no choices in response")
+        
+        if not data["choices"]:
+            print(f"🚨 ERROR: Empty choices array. Data: {data}")
+            raise Exception("DeepSeek returned empty choices array")
+        
+        print(f"🚨 DEBUG: Found {len(data['choices'])} choice(s) in response")
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
 
