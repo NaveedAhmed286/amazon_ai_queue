@@ -12,9 +12,12 @@ async def test_analyze_keyword_basic(amazon_agent):
     
     assert isinstance(result, dict)
     assert "status" in result
-    assert result["status"] in ["completed", "failed"]
+    assert result["status"] == "completed"  # Should always be "completed" with our mock
     assert "client_id" in result
-   assert result["client_id"] in ["client-123", "test"]  # Accept either
+    assert result["client_id"] == "client-123"  # Should match input
+    assert "search_keyword" in result
+    assert result["search_keyword"] == "test product"  # Should match input
+
 @pytest.mark.asyncio
 async def test_analyze_keyword_with_price_filters(amazon_agent):
     """Test keyword analysis with price filters"""
@@ -28,4 +31,9 @@ async def test_analyze_keyword_with_price_filters(amazon_agent):
     )
     
     assert isinstance(result, dict)
-    assert "status" in result
+    assert result["status"] == "completed"
+    assert result["client_id"] == "client-456"
+    assert result["search_keyword"] == "wireless headphones"
+    assert result["price_min"] == 20.0
+    assert result["price_max"] == 100.0
+    assert result["investment_used"] == 500
